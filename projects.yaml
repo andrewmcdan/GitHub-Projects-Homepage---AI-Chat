@@ -1,0 +1,9 @@
+projects:
+  - id: example
+    name: Example Project
+    repo: https://github.com/owner/repo
+    description: Replace with a real project description.
+    tags: [example, starter]
+    featured: true
+    docs:
+      - README.md

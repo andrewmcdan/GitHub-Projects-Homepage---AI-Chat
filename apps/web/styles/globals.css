@@ -1,0 +1,88 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  background: #f8f6f1;
+  color: #1b1b1b;
+}
+
+a {
+  color: #1e5676;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.page {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 48px 24px 96px;
+}
+
+.hero {
+  margin-bottom: 32px;
+}
+
+.eyebrow {
+  font-size: 14px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #6b5d52;
+}
+
+.lede {
+  max-width: 640px;
+  font-size: 18px;
+  line-height: 1.6;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 20px;
+  margin-bottom: 48px;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e4ddd2;
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag {
+  background: #f0e8dc;
+  color: #59463b;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.chat {
+  display: grid;
+  gap: 12px;
+}
+
+.chat-box {
+  border: 1px dashed #c8b8a7;
+  border-radius: 12px;
+  padding: 24px;
+  background: #faf8f4;
+}
+
+.muted {
+  color: #6b5d52;
+}
