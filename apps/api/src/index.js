@@ -4,7 +4,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Queue } from "bullmq";
-import { desc, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import OpenAI from "openai";
@@ -12,6 +12,8 @@ import YAML from "yaml";
 import {
     JOB_TYPES,
     QUEUE_NAMES,
+    chatMessages,
+    chatSessions,
     chunks,
     getRedisConnectionOptions,
     ingestJobs,
@@ -70,7 +72,45 @@ const chatTemperature = Number.parseFloat(
     process.env.CHAT_TEMPERATURE || "0.2"
 );
 const chatMaxTokens = Number.parseInt(process.env.CHAT_MAX_TOKENS || "800", 10);
-const chatTopK = Number.parseInt(process.env.CHAT_TOP_K || "8", 10);
+const chatTopK = Number.parseInt(process.env.CHAT_TOP_K || "12", 10);
+const chatHistoryLimit = Number.parseInt(
+    process.env.CHAT_HISTORY_LIMIT || "8",
+    10
+);
+const chatNeighborChunksRaw = Number.parseInt(
+    process.env.CHAT_NEIGHBOR_CHUNKS || "1",
+    10
+);
+const chatNeighborChunks =
+    Number.isFinite(chatNeighborChunksRaw) && chatNeighborChunksRaw > 0
+        ? chatNeighborChunksRaw
+        : 0;
+const chatMaxContextChunksRaw = Number.parseInt(
+    process.env.CHAT_MAX_CONTEXT_CHUNKS || "",
+    10
+);
+const chatMaxContextChunks =
+    Number.isFinite(chatMaxContextChunksRaw) && chatMaxContextChunksRaw > 0
+        ? chatMaxContextChunksRaw
+        : Math.min(
+              Math.max(
+                  chatTopK * (chatNeighborChunks * 2 + 1),
+                  chatTopK
+              ),
+              40
+          );
+const chatSnippetMaxChunks = Number.parseInt(
+    process.env.CHAT_SNIPPET_MAX_CHUNKS || "4",
+    10
+);
+const chatSnippetMaxChars = Number.parseInt(
+    process.env.CHAT_SNIPPET_MAX_CHARS || "4000",
+    10
+);
+const chatSnippetMaxLines = Number.parseInt(
+    process.env.CHAT_SNIPPET_MAX_LINES || "160",
+    10
+);
 
 const openai = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
 
@@ -180,6 +220,615 @@ const parseRepoFilter = (value) => {
     }
 
     return null;
+};
+
+const normalizeLoose = (value) =>
+    value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+const tokenizeText = (value) =>
+    value.toLowerCase().split(/[^a-z0-9]+/g).filter(Boolean);
+
+const stopWords = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "its",
+    "me",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "you",
+    "your",
+]);
+
+const repoIntentTokens = new Set([
+    "project",
+    "repo",
+    "repository",
+    "codebase",
+    "app",
+    "service",
+    "library",
+]);
+
+const hasProjectIntent = (question) => {
+    if (typeof question !== "string") {
+        return false;
+    }
+    const normalized = question.trim().toLowerCase();
+    if (!normalized) {
+        return false;
+    }
+    if (
+        normalized.startsWith("what is ") ||
+        normalized.startsWith("tell me about ") ||
+        normalized.startsWith("describe ") ||
+        normalized.startsWith("explain ") ||
+        normalized.startsWith("summarize ") ||
+        normalized.startsWith("overview of ")
+    ) {
+        return true;
+    }
+    const tokens = tokenizeText(question);
+    return tokens.some((token) => repoIntentTokens.has(token));
+};
+
+const hasTokenSequence = (tokens, phraseTokens, minTokens) => {
+    if (!Array.isArray(tokens) || !Array.isArray(phraseTokens)) {
+        return false;
+    }
+    if (tokens.length === 0 || phraseTokens.length === 0) {
+        return false;
+    }
+    const minLen = Math.min(
+        phraseTokens.length,
+        Math.max(minTokens || phraseTokens.length, 1)
+    );
+    const haystack = ` ${tokens.join(" ")} `;
+    for (let len = phraseTokens.length; len >= minLen; len -= 1) {
+        for (let start = 0; start <= phraseTokens.length - len; start += 1) {
+            const needle = ` ${phraseTokens
+                .slice(start, start + len)
+                .join(" ")} `;
+            if (haystack.includes(needle)) {
+                return true;
+            }
+        }
+    }
+    return false;
+};
+
+const isExplicitTokenMatch = (questionTokens, phraseTokens, hasIntent) => {
+    if (!Array.isArray(phraseTokens) || phraseTokens.length === 0) {
+        return false;
+    }
+    const minTokens = phraseTokens.length >= 2 ? 2 : 1;
+    if (!hasTokenSequence(questionTokens, phraseTokens, minTokens)) {
+        return false;
+    }
+    if (phraseTokens.length === 1) {
+        const token = phraseTokens[0];
+        if (token.length < 5 && !hasIntent) {
+            return false;
+        }
+    }
+    return true;
+};
+
+const extractKeywords = (value) => {
+    if (typeof value !== "string") {
+        return [];
+    }
+    const tokens = tokenizeText(value);
+    const filtered = tokens.filter(
+        (token) => token.length >= 3 && !stopWords.has(token)
+    );
+    return [...new Set(filtered)].slice(0, 8);
+};
+
+const isStatsQuestion = (question) => {
+    if (typeof question !== "string") {
+        return false;
+    }
+    const normalized = question.toLowerCase();
+    return (
+        normalized.includes("most code") ||
+        normalized.includes("largest code") ||
+        normalized.includes("largest codebase") ||
+        normalized.includes("biggest code") ||
+        normalized.includes("most lines") ||
+        normalized.includes("most files") ||
+        normalized.includes("largest project") ||
+        normalized.includes("biggest project")
+    );
+};
+
+const isEntryPointQuestion = (question) => {
+    if (typeof question !== "string") {
+        return false;
+    }
+    const normalized = question.toLowerCase();
+    return (
+        normalized.includes("entry point") ||
+        normalized.includes("entrypoint") ||
+        normalized.includes("startup") ||
+        normalized.includes("bootstrap") ||
+        normalized.includes("starting point")
+    );
+};
+
+const entrypointConfigFiles = new Set([
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "cargo.toml",
+    "go.mod",
+    "cmakelists.txt",
+    "makefile",
+    "build.gradle",
+    "pom.xml",
+]);
+
+const entrypointFileStems = new Set([
+    "main",
+    "index",
+    "app",
+    "server",
+    "cli",
+    "program",
+    "__main__",
+]);
+
+const scoreEntryPointPath = (pathValue) => {
+    if (!pathValue) {
+        return -1;
+    }
+    const normalized = pathValue.replace(/\\/g, "/").toLowerCase();
+    const baseName = path.basename(normalized);
+    const ext = path.extname(baseName);
+    const stem = ext ? baseName.slice(0, -ext.length) : baseName;
+    let score = 0;
+
+    if (entrypointConfigFiles.has(baseName)) {
+        score = Math.max(score, 2);
+    }
+    if (entrypointFileStems.has(stem)) {
+        score = Math.max(score, 4);
+    }
+    if (normalized.includes("/src/")) {
+        score += 0.5;
+    }
+    if (
+        normalized.includes("/test/") ||
+        normalized.includes("/tests/") ||
+        normalized.includes("/__tests__/")
+    ) {
+        score -= 1.5;
+    }
+
+    return score;
+};
+
+const selectEntryPointRow = (rows) => {
+    if (!Array.isArray(rows) || rows.length === 0) {
+        return null;
+    }
+
+    const candidates = rows
+        .map((row) => ({
+            row,
+            score: scoreEntryPointPath(row.path),
+            pathLength: row.path ? row.path.length : 9999,
+        }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => {
+            if (b.score !== a.score) {
+                return b.score - a.score;
+            }
+            return a.pathLength - b.pathLength;
+        });
+
+    return candidates[0]?.row || null;
+};
+
+const guessCodeFenceLanguage = (pathValue) => {
+    if (!pathValue) {
+        return "";
+    }
+    const ext = path.extname(pathValue.toLowerCase());
+    const map = {
+        ".js": "javascript",
+        ".jsx": "jsx",
+        ".ts": "ts",
+        ".tsx": "tsx",
+        ".py": "python",
+        ".go": "go",
+        ".rs": "rust",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".hpp": "cpp",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".cs": "csharp",
+        ".rb": "ruby",
+        ".php": "php",
+        ".swift": "swift",
+        ".json": "json",
+        ".yml": "yaml",
+        ".yaml": "yaml",
+        ".toml": "toml",
+        ".md": "markdown",
+        ".sh": "bash",
+        ".ps1": "powershell",
+        ".bat": "batch",
+        ".cmd": "batch",
+        ".vue": "vue",
+    };
+    return map[ext] || "";
+};
+
+const parseRepoFromProject = (project) => {
+    if (!project || typeof project !== "object") {
+        return null;
+    }
+    const repoValue =
+        typeof project.repo === "string" ? project.repo.trim() : "";
+    if (repoValue) {
+        const parsed = parseRepoFilter(repoValue);
+        if (parsed) {
+            return parsed;
+        }
+    }
+    const nameValue =
+        typeof project.name === "string" ? project.name.trim() : "";
+    if (nameValue) {
+        const parsed = parseRepoFilter(nameValue);
+        if (parsed) {
+            return parsed;
+        }
+    }
+    return null;
+};
+
+const resolveRepoFromQuestion = async (question) => {
+    if (typeof question !== "string" || !question.trim()) {
+        return null;
+    }
+
+    const projects = await readProjects();
+    if (projects.length === 0) {
+        return null;
+    }
+
+    const normalizedQuestion = question.toLowerCase();
+    const looseQuestion = normalizeLoose(question);
+    const questionTokens = tokenizeText(question);
+    const questionTokenSet = new Set(questionTokens);
+    const questionHasIntent = hasProjectIntent(question);
+    const candidates = [];
+
+    for (const project of projects) {
+        const repo = parseRepoFromProject(project);
+        if (!repo) {
+            continue;
+        }
+        const repoId = `${repo.owner}/${repo.repo}`;
+        const repoLower = repoId.toLowerCase();
+        if (normalizedQuestion.includes(repoLower)) {
+            candidates.push({ repo, score: 3, explicit: true });
+            continue;
+        }
+
+        const nameValue =
+            typeof project.name === "string" ? project.name.trim() : "";
+        const nameLoose = normalizeLoose(nameValue);
+        const nameTokens = tokenizeText(nameValue);
+        const explicitNameMatch = isExplicitTokenMatch(
+            questionTokens,
+            nameTokens,
+            questionHasIntent
+        );
+        if (nameLoose && looseQuestion.includes(nameLoose)) {
+            candidates.push({
+                repo,
+                score: 2,
+                explicit: explicitNameMatch,
+            });
+            continue;
+        }
+
+        const repoName = repo.repo || "";
+        const repoLoose = normalizeLoose(repoName);
+        const repoTokens = tokenizeText(repoName);
+        const explicitRepoMatch = isExplicitTokenMatch(
+            questionTokens,
+            repoTokens,
+            questionHasIntent
+        );
+        if (repoLoose && looseQuestion.includes(repoLoose)) {
+            candidates.push({
+                repo,
+                score: 1,
+                explicit: explicitRepoMatch,
+            });
+            continue;
+        }
+
+        const descriptionValue =
+            typeof project.description === "string"
+                ? project.description.trim()
+                : "";
+        const descriptionTokens = tokenizeText(descriptionValue);
+        const tagTokens = Array.isArray(project.tags)
+            ? project.tags.flatMap((tag) =>
+                  typeof tag === "string" ? tokenizeText(tag) : []
+              )
+            : [];
+        const metaTokens = new Set([
+            ...tokenizeText(nameValue),
+            ...descriptionTokens,
+            ...tagTokens,
+        ]);
+        const overlap = [...metaTokens].filter(
+            (token) => token.length >= 4 && questionTokenSet.has(token)
+        );
+        if (overlap.length >= 2) {
+            candidates.push({ repo, score: 1, explicit: false });
+            continue;
+        }
+        if (overlap.length === 1) {
+            candidates.push({ repo, score: 0.5, explicit: false });
+            continue;
+        }
+
+        const tokenMatches = [
+            ...new Set([...tokenizeText(nameValue), ...tokenizeText(repoId)]),
+        ].filter(
+            (token) => token.length >= 4 && questionTokenSet.has(token)
+        );
+        if (tokenMatches.length > 0) {
+            candidates.push({ repo, score: 0, explicit: false });
+        }
+    }
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    const topScore = candidates[0].score;
+    const topRepos = [
+        ...new Map(
+            candidates
+                .filter((item) => item.score === topScore)
+                .map((item) => [`${item.repo.owner}/${item.repo.repo}`, item])
+        ).values(),
+    ];
+
+    return topRepos.length === 1 ? topRepos[0] : null;
+};
+
+const isSameRepo = (left, right) => {
+    if (!left || !right) {
+        return false;
+    }
+    return (
+        left.owner.toLowerCase() === right.owner.toLowerCase() &&
+        left.repo.toLowerCase() === right.repo.toLowerCase()
+    );
+};
+
+const normalizeChatHistory = (value, limit) => {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    const cleaned = value
+        .map((item) => {
+            if (!item || typeof item !== "object") {
+                return null;
+            }
+            const role = item.role === "assistant" ? "assistant" : item.role === "user" ? "user" : null;
+            const content =
+                typeof item.content === "string" ? item.content.trim() : "";
+            if (!role || !content) {
+                return null;
+            }
+            const citations =
+                Array.isArray(item.citations) && item.citations.length > 0
+                    ? item.citations
+                    : null;
+            return citations ? { role, content, citations } : { role, content };
+        })
+        .filter(Boolean);
+
+    if (!Number.isFinite(limit) || limit <= 0) {
+        return cleaned;
+    }
+
+    return cleaned.length > limit ? cleaned.slice(-limit) : cleaned;
+};
+
+const historyToText = (history) =>
+    history
+        .map(
+            (item) =>
+                `${item.role === "assistant" ? "Assistant" : "User"}: ${
+                    item.content
+                }`
+        )
+        .join("\n");
+
+const buildRetrievalQuestion = (question, history) => {
+    const lastUser = [...history]
+        .reverse()
+        .find((item) => item.role === "user");
+    if (!lastUser) {
+        return question;
+    }
+    return `${lastUser.content}\n\nFollow-up: ${question}`;
+};
+
+const inferRepoFromHistory = (history) => {
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+        const item = history[index];
+        const citations = item?.citations;
+        if (!Array.isArray(citations) || citations.length === 0) {
+            continue;
+        }
+        const counts = new Map();
+        for (const citation of citations) {
+            const repo =
+                citation && typeof citation.repo === "string"
+                    ? citation.repo.trim()
+                    : "";
+            if (!repo) {
+                continue;
+            }
+            counts.set(repo, (counts.get(repo) || 0) + 1);
+        }
+        if (counts.size === 0) {
+            continue;
+        }
+        const [repo] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+        return parseRepoFilter(repo);
+    }
+
+    return null;
+};
+
+const normalizeVisitorId = (value) => {
+    if (typeof value !== "string") {
+        return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+    return trimmed.slice(0, 200);
+};
+
+const normalizeSessionId = (value) => {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return null;
+    }
+    return parsed;
+};
+
+const fetchChatSession = async (sessionId) => {
+    if (!sessionId) {
+        return null;
+    }
+    const rows = await db
+        .select({
+            id: chatSessions.id,
+            visitorId: chatSessions.visitorId,
+            createdAt: chatSessions.createdAt,
+        })
+        .from(chatSessions)
+        .where(eq(chatSessions.id, sessionId))
+        .limit(1);
+    return rows[0] || null;
+};
+
+const createChatSession = async (visitorId) => {
+    const result = await db
+        .insert(chatSessions)
+        .values({ visitorId: visitorId || null })
+        .returning({ id: chatSessions.id });
+    return result[0]?.id || null;
+};
+
+const fetchChatHistory = async (sessionId, limit) => {
+    if (!sessionId) {
+        return [];
+    }
+    const cappedLimit =
+        Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 50;
+    const rows = await db
+        .select({
+            id: chatMessages.id,
+            role: chatMessages.role,
+            content: chatMessages.content,
+            citations: chatMessages.citations,
+            createdAt: chatMessages.createdAt,
+        })
+        .from(chatMessages)
+        .where(eq(chatMessages.sessionId, sessionId))
+        .orderBy(desc(chatMessages.id))
+        .limit(cappedLimit);
+    return rows.reverse();
+};
+
+const storeChatMessage = async ({
+    sessionId,
+    role,
+    content,
+    citations = null,
+}) => {
+    if (!sessionId || !role || !content) {
+        return;
+    }
+    await db.insert(chatMessages).values({
+        sessionId,
+        role,
+        content,
+        citations,
+    });
+};
+
+const listChatSessions = async (visitorId, limit) => {
+    const cappedLimit =
+        Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 50;
+    const result = await db.execute(sql`
+        select
+            s.id as "id",
+            s.created_at as "createdAt",
+            m.content as "lastMessage",
+            m.role as "lastRole",
+            m.created_at as "lastMessageAt"
+        from ${chatSessions} s
+        left join lateral (
+            select content, role, created_at
+            from ${chatMessages} m
+            where m.session_id = s.id
+            order by m.id desc
+            limit 1
+        ) m on true
+        where s.visitor_id = ${visitorId}
+        order by coalesce(m.created_at, s.created_at) desc
+        limit ${cappedLimit}
+    `);
+    return extractRows(result);
 };
 
 const base64UrlEncode = (input) =>
@@ -419,6 +1068,7 @@ const retrieveChunks = async (question, repoFilter, limit) => {
     let query = sql`
     select
       c.id,
+      c.source_id as "sourceId",
       c.content,
       c.metadata,
       s.path,
@@ -443,6 +1093,451 @@ const retrieveChunks = async (question, repoFilter, limit) => {
 
     const result = await db.execute(query);
     return extractRows(result);
+};
+
+const retrieveLexicalChunks = async (keywords, repoFilter, limit) => {
+    if (!Array.isArray(keywords) || keywords.length === 0) {
+        return [];
+    }
+
+    const patterns = keywords.map((keyword) => `%${keyword}%`);
+    const patternSql = sql`ARRAY[${sql.join(
+        patterns.map((pattern) => sql`${pattern}`),
+        sql`, `
+    )}]`;
+    const keywordClause = sql`(c.content ILIKE ANY (${patternSql}) or s.path ILIKE ANY (${patternSql}))`;
+
+    let query = sql`
+      select
+        c.id,
+        c.source_id as "sourceId",
+        c.content,
+        c.metadata,
+        s.path,
+        s.url,
+        s.repo_owner,
+        s.repo_name,
+        s.ref,
+        s.ref_type
+      from ${chunks} c
+      join ${sources} s on s.id = c.source_id
+    `;
+
+    if (repoFilter) {
+        query = sql`${query} where s.repo_owner = ${repoFilter.owner}
+          and s.repo_name = ${repoFilter.repo}
+          and ${keywordClause}`;
+    } else {
+        query = sql`${query} where ${keywordClause}`;
+    }
+
+    query = sql`${query}
+      order by c.id desc
+      limit ${limit}
+    `;
+
+    const result = await db.execute(query);
+    return extractRows(result);
+};
+
+const retrieveEntryPointChunks = async (repoFilter, limit) => {
+    const patterns = [
+        "%/main.%",
+        "%/index.%",
+        "%/app.%",
+        "%/server.%",
+        "%/cli.%",
+        "%/program.%",
+        "%/__main__.py%",
+        "%/main.go%",
+        "%/main.rs%",
+        "%/main.cpp%",
+        "%/main.c%",
+        "%/main.java%",
+        "%/main.kt%",
+        "%/main.ts%",
+        "%/main.js%",
+        "%/main.tsx%",
+        "%/main.jsx%",
+        "%/main.vue%",
+        "%/app.tsx%",
+        "%/app.jsx%",
+        "%/app.vue%",
+        "%/package.json%",
+        "%/pyproject.toml%",
+        "%/setup.py%",
+        "%/cargo.toml%",
+        "%/go.mod%",
+        "%/cmakelists.txt%",
+        "%/makefile%",
+        "%/gradle.build%",
+        "%/build.gradle%",
+        "%/pom.xml%"
+    ];
+    const patternSql = sql`ARRAY[${sql.join(
+        patterns.map((pattern) => sql`${pattern}`),
+        sql`, `
+    )}]`;
+    const pathClause = sql`s.path ILIKE ANY (${patternSql})`;
+
+    let query = sql`
+      select
+        c.id,
+        c.source_id as "sourceId",
+        c.content,
+        c.metadata,
+        s.path,
+        s.url,
+        s.repo_owner,
+        s.repo_name,
+        s.ref,
+        s.ref_type
+      from ${chunks} c
+      join ${sources} s on s.id = c.source_id
+      where ${pathClause}
+        and (c.metadata->>'chunkIndex')::int in (0, 1)
+    `;
+
+    if (repoFilter) {
+        query = sql`${query} and s.repo_owner = ${repoFilter.owner}
+          and s.repo_name = ${repoFilter.repo}`;
+    }
+
+    query = sql`${query}
+      order by s.path asc
+      limit ${limit}
+    `;
+
+    const result = await db.execute(query);
+    return extractRows(result);
+};
+
+const mergeRows = (primary, secondary, maxRows) => {
+    const merged = [];
+    const seen = new Set();
+
+    for (const row of primary || []) {
+        if (row && !seen.has(row.id)) {
+            seen.add(row.id);
+            merged.push(row);
+        }
+    }
+
+    for (const row of secondary || []) {
+        if (row && !seen.has(row.id)) {
+            seen.add(row.id);
+            merged.push(row);
+        }
+    }
+
+    if (Number.isFinite(maxRows) && maxRows > 0 && merged.length > maxRows) {
+        return merged.slice(0, maxRows);
+    }
+
+    return merged;
+};
+
+const expandWithNeighborChunks = async (rows, neighborCount, maxRows) => {
+    if (!Array.isArray(rows) || rows.length === 0 || neighborCount <= 0) {
+        return rows;
+    }
+
+    const indicesBySource = new Map();
+    for (const row of rows) {
+        const sourceId = row?.sourceId;
+        const chunkIndex = Number.parseInt(
+            row?.metadata?.chunkIndex,
+            10
+        );
+        if (!sourceId || !Number.isFinite(chunkIndex)) {
+            continue;
+        }
+        const set = indicesBySource.get(sourceId) || new Set();
+        for (let offset = 1; offset <= neighborCount; offset += 1) {
+            if (chunkIndex - offset >= 0) {
+                set.add(chunkIndex - offset);
+            }
+            set.add(chunkIndex + offset);
+        }
+        indicesBySource.set(sourceId, set);
+    }
+
+    if (indicesBySource.size === 0) {
+        return rows;
+    }
+
+    const extras = [];
+    for (const [sourceId, indexSet] of indicesBySource) {
+        const indexes = [...indexSet].filter((value) =>
+            Number.isFinite(value)
+        );
+        if (indexes.length === 0) {
+            continue;
+        }
+        const indexSql = sql.join(
+            indexes.map((value) => sql`${value}`),
+            sql`, `
+        );
+        const result = await db.execute(sql`
+            select
+              c.id,
+              c.source_id as "sourceId",
+              c.content,
+              c.metadata,
+              s.path,
+              s.url,
+              s.repo_owner,
+              s.repo_name,
+              s.ref,
+              s.ref_type
+            from ${chunks} c
+            join ${sources} s on s.id = c.source_id
+            where c.source_id = ${sourceId}
+              and (c.metadata->>'chunkIndex')::int in (${indexSql})
+        `);
+        extras.push(...extractRows(result));
+    }
+
+    const seen = new Set(rows.map((row) => row.id));
+    const merged = [...rows];
+    for (const row of extras) {
+        if (row && !seen.has(row.id)) {
+            seen.add(row.id);
+            merged.push(row);
+        }
+    }
+
+    if (Number.isFinite(maxRows) && maxRows > 0 && merged.length > maxRows) {
+        return merged.slice(0, maxRows);
+    }
+
+    return merged;
+};
+
+const buildContextRows = async ({
+    question,
+    retrievalQuestion,
+    repoFilter,
+    allowGlobalFallback,
+    limit,
+    skipSemantic = false,
+}) => {
+    if (skipSemantic) {
+        return [];
+    }
+
+    let keywords = extractKeywords(question);
+    const baseRows = await retrieveChunks(retrievalQuestion, repoFilter, limit);
+    if (isEntryPointQuestion(question)) {
+        const entryKeywords = [
+            "entry",
+            "entrypoint",
+            "main",
+            "index",
+            "app",
+            "server",
+            "bootstrap",
+            "start",
+        ];
+        keywords = [
+            ...new Set([...keywords, ...entryKeywords]),
+        ];
+    }
+    const lexicalRows = await retrieveLexicalChunks(
+        keywords,
+        repoFilter,
+        limit
+    );
+    let merged = mergeRows(baseRows, lexicalRows, chatMaxContextChunks);
+
+    if (isEntryPointQuestion(question)) {
+        const entryRows = await retrieveEntryPointChunks(
+            repoFilter,
+            Math.max(limit, 6)
+        );
+        merged = mergeRows(merged, entryRows, chatMaxContextChunks);
+    }
+
+    if (allowGlobalFallback && merged.length < limit) {
+        const globalBase = await retrieveChunks(retrievalQuestion, null, limit);
+        const globalLexical = await retrieveLexicalChunks(
+            keywords,
+            null,
+            limit
+        );
+        merged = mergeRows(
+            merged,
+            mergeRows(globalBase, globalLexical),
+            chatMaxContextChunks
+        );
+    }
+
+    return expandWithNeighborChunks(
+        merged,
+        chatNeighborChunks,
+        chatMaxContextChunks
+    );
+};
+
+const formatNumber = (value) => {
+    if (value === null || value === undefined) {
+        return "0";
+    }
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+        return numeric.toLocaleString();
+    }
+    return String(value);
+};
+
+const fetchRepoStats = async (limit) => {
+    const cappedLimit =
+        Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 20;
+    const result = await db.execute(sql`
+        select
+            s.repo_owner as "repoOwner",
+            s.repo_name as "repoName",
+            count(distinct s.id) as "fileCount",
+            count(c.id) as "chunkCount",
+            sum(length(c.content)) as "contentChars"
+        from ${sources} s
+        join ${chunks} c on c.source_id = s.id
+        group by s.repo_owner, s.repo_name
+        order by sum(length(c.content)) desc
+        limit ${cappedLimit}
+    `);
+    return extractRows(result);
+};
+
+const buildStatsContext = (rows) => {
+    if (!Array.isArray(rows) || rows.length === 0) {
+        return null;
+    }
+
+    const lines = rows.map((row) => {
+        const repo =
+            row.repoOwner && row.repoName
+                ? `${row.repoOwner}/${row.repoName}`
+                : "unknown";
+        return `- ${repo}: ${formatNumber(row.contentChars)} indexed chars, ${formatNumber(
+            row.fileCount
+        )} files`;
+    });
+
+    return {
+        label: "index stats",
+        header: "type=stats",
+        content:
+            "Approximate index coverage by repository (larger means more indexed code).\n" +
+            lines.join("\n"),
+        path: "index-stats",
+    };
+};
+
+const buildChatContext = (rows, extras = []) => {
+    const citations = rows.map((row, index) => ({
+        index: index + 1,
+        repo:
+            row.repo_owner && row.repo_name
+                ? `${row.repo_owner}/${row.repo_name}`
+                : null,
+        path: row.path || null,
+        ref: row.ref || null,
+        url: row.url || null,
+    }));
+
+    const contextBlocks = rows.map((row, index) => {
+        const repoLabel =
+            row.repo_owner && row.repo_name
+                ? `${row.repo_owner}/${row.repo_name}`
+                : "unknown";
+        const header = `[source:${index + 1}] repo=${repoLabel} path=${
+            row.path || "unknown"
+        } url=${row.url || "n/a"}`;
+        return `${header}\n${row.content}`;
+    });
+
+    let nextIndex = citations.length;
+    for (const extra of extras) {
+        nextIndex += 1;
+        citations.push({
+            index: nextIndex,
+            repo: extra.repo || null,
+            path: extra.path || extra.label || "context",
+            url: extra.url || null,
+        });
+        const header = `[source:${nextIndex}] ${extra.header || extra.label}`;
+        contextBlocks.push(`${header}\n${extra.content}`);
+    }
+
+    return { citations, contextBlocks };
+};
+
+const fetchSourceSnippet = async (sourceId, options = {}) => {
+    if (!sourceId) {
+        return null;
+    }
+    const maxChunks = Number.isFinite(options.maxChunks)
+        ? options.maxChunks
+        : 4;
+    const maxChars = Number.isFinite(options.maxChars)
+        ? options.maxChars
+        : 4000;
+    const maxLines = Number.isFinite(options.maxLines)
+        ? options.maxLines
+        : 160;
+
+    const result = await db.execute(sql`
+        select
+            c.content,
+            c.metadata
+        from ${chunks} c
+        where c.source_id = ${sourceId}
+        order by (c.metadata->>'chunkIndex')::int asc
+        limit ${maxChunks}
+    `);
+    const rows = extractRows(result);
+    if (rows.length === 0) {
+        return null;
+    }
+
+    const combined = rows.map((row) => row.content).join("\n");
+    let snippet = combined;
+    let truncated = false;
+
+    const lines = snippet.split("\n");
+    if (lines.length > maxLines) {
+        snippet = lines.slice(0, maxLines).join("\n");
+        truncated = true;
+    }
+    if (snippet.length > maxChars) {
+        snippet = snippet.slice(0, maxChars);
+        truncated = true;
+    }
+
+    return { snippet, truncated };
+};
+
+const buildSnippetContext = (row, snippetResult) => {
+    if (!row || !snippetResult?.snippet) {
+        return null;
+    }
+    const language = guessCodeFenceLanguage(row.path);
+    const fence = language ? `\`\`\`${language}` : "```";
+    const note = snippetResult.truncated
+        ? "\n\nNote: snippet truncated for brevity."
+        : "";
+    return {
+        label: "entrypoint snippet",
+        header: `type=snippet path=${row.path || "unknown"}`,
+        content: `${fence}\n${snippetResult.snippet}\n\`\`\`${note}`,
+        repo:
+            row.repo_owner && row.repo_name
+                ? `${row.repo_owner}/${row.repo_name}`
+                : null,
+        path: row.path || null,
+        url: row.url || null,
+    };
 };
 
 const requireAdmin = (request, reply) => {
@@ -492,6 +1587,85 @@ app.post("/projects", async (request, reply) => {
     reply.code(201).send({ status: "created", project });
 });
 
+app.post("/chat/sessions", async (request, reply) => {
+    const visitorId = normalizeVisitorId(
+        request.body?.visitorId || request.headers["x-visitor-id"]
+    );
+    if (!visitorId) {
+        reply.code(400).send({ error: "visitorId is required" });
+        return;
+    }
+
+    try {
+        const sessionId = await createChatSession(visitorId);
+        reply.send({ sessionId });
+    } catch (err) {
+        reply
+            .code(500)
+            .send({ error: err.message || "Failed to create session" });
+    }
+});
+
+app.get("/chat/sessions", async (request, reply) => {
+    const visitorId = normalizeVisitorId(
+        request.query?.visitorId || request.headers["x-visitor-id"]
+    );
+    if (!visitorId) {
+        reply.code(400).send({ error: "visitorId is required" });
+        return;
+    }
+
+    const rawLimit = Number.parseInt(request.query?.limit, 10);
+    const limit = Number.isFinite(rawLimit)
+        ? Math.min(Math.max(rawLimit, 1), 200)
+        : 50;
+
+    try {
+        const sessions = await listChatSessions(visitorId, limit);
+        reply.send({ sessions });
+    } catch (err) {
+        reply
+            .code(500)
+            .send({ error: err.message || "Failed to load sessions" });
+    }
+});
+
+app.get("/chat/sessions/:id/messages", async (request, reply) => {
+    const sessionId = normalizeSessionId(request.params?.id);
+    if (!sessionId) {
+        reply.code(400).send({ error: "sessionId is required" });
+        return;
+    }
+
+    const visitorId = normalizeVisitorId(
+        request.query?.visitorId || request.headers["x-visitor-id"]
+    );
+    if (!visitorId) {
+        reply.code(400).send({ error: "visitorId is required" });
+        return;
+    }
+
+    const session = await fetchChatSession(sessionId);
+    if (!session || (session.visitorId && session.visitorId !== visitorId)) {
+        reply.code(404).send({ error: "Session not found" });
+        return;
+    }
+
+    const rawLimit = Number.parseInt(request.query?.limit, 10);
+    const limit = Number.isFinite(rawLimit)
+        ? Math.min(Math.max(rawLimit, 1), 200)
+        : 200;
+
+    try {
+        const messages = await fetchChatHistory(sessionId, limit);
+        reply.send({ sessionId, messages });
+    } catch (err) {
+        reply
+            .code(500)
+            .send({ error: err.message || "Failed to load messages" });
+    }
+});
+
 app.post("/chat", async (_request, reply) => {
     const body = _request.body || {};
     const acceptHeader = _request.headers.accept || "";
@@ -511,12 +1685,98 @@ app.post("/chat", async (_request, reply) => {
         return;
     }
 
+    const statsQuestion = isStatsQuestion(question);
+    const visitorId = normalizeVisitorId(
+        body.visitorId || _request.headers["x-visitor-id"]
+    );
+    const sessionIdInput =
+        body.sessionId || body.session_id || body.chatSessionId;
+    let sessionId = normalizeSessionId(sessionIdInput);
+
+    if (sessionId) {
+        const session = await fetchChatSession(sessionId);
+        if (
+            !session ||
+            (visitorId && session.visitorId && session.visitorId !== visitorId)
+        ) {
+            reply.code(404).send({ error: "Session not found" });
+            return;
+        }
+    }
+
+    if (!sessionId) {
+        try {
+            sessionId = await createChatSession(visitorId);
+        } catch (err) {
+            app.log.error(err);
+            sessionId = null;
+        }
+    }
+
+    let history = [];
+    if (sessionId) {
+        history = await fetchChatHistory(sessionId, chatHistoryLimit);
+    }
+    if (history.length === 0) {
+        history = normalizeChatHistory(
+            body.history || body.messages,
+            chatHistoryLimit
+        );
+    }
+
+    const historyRepo =
+        history.length > 0 ? inferRepoFromHistory(history) : null;
+    const questionRepoMatch = await resolveRepoFromQuestion(question);
+    const questionRepo = questionRepoMatch?.repo || null;
+    const questionRepoExplicit = Boolean(questionRepoMatch?.explicit);
     const repoFilterInput =
         body.repo || body.repoUrl || body.project || body.projectRepo;
-    const repoFilter = parseRepoFilter(repoFilterInput);
+    const repoInput = parseRepoFilter(repoFilterInput);
+    let repoFilter = repoInput;
+    const hasContextRepo = Boolean(historyRepo || repoInput);
+    const shouldUseQuestionRepo =
+        questionRepo && (!hasContextRepo || questionRepoExplicit);
+    if (
+        shouldUseQuestionRepo &&
+        (!repoFilter || !isSameRepo(repoFilter, questionRepo))
+    ) {
+        repoFilter = questionRepo;
+    }
+    if (!repoFilter && historyRepo) {
+        repoFilter = historyRepo;
+    }
+    if (historyRepo && repoFilter && !isSameRepo(historyRepo, repoFilter)) {
+        history = [];
+    }
+    if (statsQuestion) {
+        repoFilter = null;
+        history = [];
+    }
+
+    const historyText = historyToText(history);
+    const retrievalQuestion = buildRetrievalQuestion(question, history);
     const limit = Number.isFinite(Number(body.topK))
         ? Math.min(Math.max(Number(body.topK), 1), 20)
         : Math.min(Math.max(chatTopK, 1), 20);
+    const repoIsExplicit = Boolean(
+        repoFilter && (questionRepoExplicit || repoInput || historyRepo)
+    );
+    const allowGlobalFallback = statsQuestion || !repoFilter || !repoIsExplicit;
+    const conversationBlock = historyText
+        ? `Conversation:\n${historyText}\n\n`
+        : "";
+
+    if (sessionId) {
+        try {
+            await storeChatMessage({
+                sessionId,
+                role: "user",
+                content: question,
+            });
+        } catch (err) {
+            app.log.error(err);
+        }
+    }
 
     try {
         if (wantsStream) {
@@ -544,56 +1804,96 @@ app.post("/chat", async (_request, reply) => {
             reply.raw.on("close", onClose);
 
             try {
-                const rows = await retrieveChunks(question, repoFilter, limit);
-                if (rows.length === 0) {
-                    sendEvent("meta", { citations: [], context: { count: 0 } });
+                const rows = await buildContextRows({
+                    question,
+                    retrievalQuestion,
+                    repoFilter,
+                    allowGlobalFallback,
+                    limit,
+                    skipSemantic: statsQuestion,
+                });
+                const extras = [];
+                if (statsQuestion) {
+                    const statsRows = await fetchRepoStats(10);
+                    const statsContext = buildStatsContext(statsRows);
+                    if (statsContext) {
+                        extras.push(statsContext);
+                    }
+                }
+                if (isEntryPointQuestion(question)) {
+                    let entryRow = selectEntryPointRow(rows);
+                    if (!entryRow) {
+                        const entryRows = await retrieveEntryPointChunks(
+                            repoFilter,
+                            6
+                        );
+                        entryRow = entryRows[0] || null;
+                    }
+                    if (entryRow) {
+                        const snippetResult = await fetchSourceSnippet(
+                            entryRow.sourceId,
+                            {
+                                maxChunks: chatSnippetMaxChunks,
+                                maxChars: chatSnippetMaxChars,
+                                maxLines: chatSnippetMaxLines,
+                            }
+                        );
+                        const snippetContext = buildSnippetContext(
+                            entryRow,
+                            snippetResult
+                        );
+                        if (snippetContext) {
+                            extras.push(snippetContext);
+                        }
+                    }
+                }
+
+                if (rows.length === 0 && extras.length === 0) {
+                    sendEvent("meta", {
+                        sessionId,
+                        citations: [],
+                        context: { count: 0 },
+                    });
                     sendEvent("delta", {
                         delta: "I don't know based on the indexed sources.",
                     });
                     sendEvent("done", {});
+                    if (sessionId) {
+                        await storeChatMessage({
+                            sessionId,
+                            role: "assistant",
+                            content: "I don't know based on the indexed sources.",
+                            citations: [],
+                        });
+                    }
                     reply.raw.end();
                     return;
                 }
 
-                const citations = rows.map((row, index) => ({
-                    index: index + 1,
-                    repo:
-                        row.repo_owner && row.repo_name
-                            ? `${row.repo_owner}/${row.repo_name}`
-                            : null,
-                    path: row.path || null,
-                    ref: row.ref || null,
-                    url: row.url || null,
-                }));
-
-                const contextBlocks = rows.map((row, index) => {
-                    const repoLabel =
-                        row.repo_owner && row.repo_name
-                            ? `${row.repo_owner}/${row.repo_name}`
-                            : "unknown";
-                    const header = `[source:${
-                        index + 1
-                    }] repo=${repoLabel} path=${row.path || "unknown"} url=${
-                        row.url || "n/a"
-                    }`;
-                    return `${header}\n${row.content}`;
-                });
+                const { citations, contextBlocks } = buildChatContext(
+                    rows,
+                    extras
+                );
 
                 const systemPrompt = [
-                    "You answer questions about GitHub repositories using ONLY the provided context.",
+                    "You answer questions about GitHub repositories using ONLY the provided context blocks.",
+                    "Use the conversation history to interpret follow-up questions, but answers must come from the context blocks.",
                     "If the answer is not in the context, say you don't know.",
+                    "When asked about code or entry points, include the relevant snippet in a fenced code block.",
                     "Cite sources using [source:n] where n matches the context block.",
                 ].join(" ");
 
-                const userPrompt = `Question: ${question}\n\nContext:\n${contextBlocks.join(
+                const userPrompt = `${conversationBlock}Question: ${question}\n\nContext:\n${contextBlocks.join(
                     "\n\n"
                 )}`;
 
                 sendEvent("meta", {
+                    sessionId,
                     citations,
-                    context: { count: rows.length },
+                    context: { count: contextBlocks.length },
                 });
 
+                let assistantContent = "";
                 const stream = await openai.chat.completions.create(
                     {
                         model: chatModel,
@@ -617,11 +1917,20 @@ app.post("/chat", async (_request, reply) => {
                 for await (const chunk of stream) {
                     const delta = chunk.choices?.[0]?.delta?.content;
                     if (delta) {
+                        assistantContent += delta;
                         sendEvent("delta", { delta });
                     }
                 }
 
                 sendEvent("done", {});
+                if (sessionId && assistantContent.trim()) {
+                    await storeChatMessage({
+                        sessionId,
+                        role: "assistant",
+                        content: assistantContent.trim(),
+                        citations,
+                    });
+                }
             } catch (err) {
                 sendEvent("error", { error: err.message || "Chat failed" });
             } finally {
@@ -632,45 +1941,79 @@ app.post("/chat", async (_request, reply) => {
             return;
         }
 
-        const rows = await retrieveChunks(question, repoFilter, limit);
-        if (rows.length === 0) {
+        const rows = await buildContextRows({
+            question,
+            retrievalQuestion,
+            repoFilter,
+            allowGlobalFallback,
+            limit,
+            skipSemantic: statsQuestion,
+        });
+        const extras = [];
+        if (statsQuestion) {
+            const statsRows = await fetchRepoStats(10);
+            const statsContext = buildStatsContext(statsRows);
+            if (statsContext) {
+                extras.push(statsContext);
+            }
+        }
+        if (isEntryPointQuestion(question)) {
+            let entryRow = selectEntryPointRow(rows);
+            if (!entryRow) {
+                const entryRows = await retrieveEntryPointChunks(
+                    repoFilter,
+                    6
+                );
+                entryRow = entryRows[0] || null;
+            }
+            if (entryRow) {
+                const snippetResult = await fetchSourceSnippet(
+                    entryRow.sourceId,
+                    {
+                        maxChunks: chatSnippetMaxChunks,
+                        maxChars: chatSnippetMaxChars,
+                        maxLines: chatSnippetMaxLines,
+                    }
+                );
+                const snippetContext = buildSnippetContext(
+                    entryRow,
+                    snippetResult
+                );
+                if (snippetContext) {
+                    extras.push(snippetContext);
+                }
+            }
+        }
+
+        if (rows.length === 0 && extras.length === 0) {
             reply.send({
                 answer: "I don't know based on the indexed sources.",
                 citations: [],
                 context: { count: 0 },
+                sessionId,
             });
+            if (sessionId) {
+                await storeChatMessage({
+                    sessionId,
+                    role: "assistant",
+                    content: "I don't know based on the indexed sources.",
+                    citations: [],
+                });
+            }
             return;
         }
 
-        const citations = rows.map((row, index) => ({
-            index: index + 1,
-            repo:
-                row.repo_owner && row.repo_name
-                    ? `${row.repo_owner}/${row.repo_name}`
-                    : null,
-            path: row.path || null,
-            ref: row.ref || null,
-            url: row.url || null,
-        }));
-
-        const contextBlocks = rows.map((row, index) => {
-            const repoLabel =
-                row.repo_owner && row.repo_name
-                    ? `${row.repo_owner}/${row.repo_name}`
-                    : "unknown";
-            const header = `[source:${index + 1}] repo=${repoLabel} path=${
-                row.path || "unknown"
-            } url=${row.url || "n/a"}`;
-            return `${header}\n${row.content}`;
-        });
+        const { citations, contextBlocks } = buildChatContext(rows, extras);
 
         const systemPrompt = [
-            "You answer questions about GitHub repositories using ONLY the provided context.",
+            "You answer questions about GitHub repositories using ONLY the provided context blocks.",
+            "Use the conversation history to interpret follow-up questions, but answers must come from the context blocks.",
             "If the answer is not in the context, say you don't know.",
+            "When asked about code or entry points, include the relevant snippet in a fenced code block.",
             "Cite sources using [source:n] where n matches the context block.",
         ].join(" ");
 
-        const userPrompt = `Question: ${question}\n\nContext:\n${contextBlocks.join(
+        const userPrompt = `${conversationBlock}Question: ${question}\n\nContext:\n${contextBlocks.join(
             "\n\n"
         )}`;
 
@@ -691,8 +2034,17 @@ app.post("/chat", async (_request, reply) => {
         reply.send({
             answer,
             citations,
-            context: { count: rows.length },
+            context: { count: contextBlocks.length },
+            sessionId,
         });
+        if (sessionId && answer) {
+            await storeChatMessage({
+                sessionId,
+                role: "assistant",
+                content: answer,
+                citations,
+            });
+        }
     } catch (err) {
         reply.code(500).send({ error: err.message || "Chat failed" });
     }
