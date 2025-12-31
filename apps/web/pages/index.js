@@ -1125,9 +1125,6 @@ export default function Home() {
         <div className="sidebar-header">
           <p className="eyebrow">Projects</p>
           <h2>Project catalog</h2>
-          <p className="muted">
-            Paste a GitHub repo URL to add it. Details are pulled from GitHub.
-          </p>
         </div>
 
         <div className="project-list">

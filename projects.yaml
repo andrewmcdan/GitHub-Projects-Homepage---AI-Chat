@@ -71,7 +71,7 @@ projects:
   - id: andrewmcdan-fire-sequencer
     name: andrewmcdan/Fire-Sequencer
     repo: https://github.com/andrewmcdan/Fire-Sequencer
-    description: ""
+    description: Akai Fire + Node.js = Sequencer!
     tags: []
     featured: false
     docs:
@@ -107,6 +107,14 @@ projects:
   - id: andrewmcdan-github-projects-homepage-ai-chat
     name: andrewmcdan/GitHub-Projects-Homepage---AI-Chat
     repo: https://github.com/andrewmcdan/GitHub-Projects-Homepage---AI-Chat
+    description: ""
+    tags: []
+    featured: false
+    docs:
+      - README.md
+  - id: andrewmcdan-tactical_mapping
+    name: andrewmcdan/Tactical_Mapping
+    repo: https://github.com/andrewmcdan/Tactical_Mapping
     description: ""
     tags: []
     featured: false

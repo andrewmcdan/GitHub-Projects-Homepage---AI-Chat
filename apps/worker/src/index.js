@@ -66,6 +66,10 @@ const githubAppPrivateKeyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
 const githubAppPrivateKeyRaw = process.env.GITHUB_APP_PRIVATE_KEY;
 const githubAppInstallationId = process.env.GITHUB_APP_INSTALLATION_ID;
 
+const installationTokenCache = new Map();
+const installationIdCache = new Map();
+const installationIdCacheTtlMs = 10 * 60 * 1000;
+
 const resolvePrivateKey = () => {
   if (githubAppPrivateKeyRaw) {
     return githubAppPrivateKeyRaw;
@@ -86,8 +90,58 @@ const resolvePrivateKey = () => {
 
 const githubAppPrivateKey = resolvePrivateKey();
 
-let cachedInstallationToken = null;
-let cachedInstallationExpiresAt = 0;
+const getCachedInstallationToken = (installationId) => {
+  if (!installationId) {
+    return null;
+  }
+  const cached = installationTokenCache.get(String(installationId));
+  if (!cached) {
+    return null;
+  }
+  const now = Date.now();
+  if (cached.expiresAt && cached.expiresAt > now + 60_000) {
+    return cached.token;
+  }
+  installationTokenCache.delete(String(installationId));
+  return null;
+};
+
+const setCachedInstallationToken = (installationId, token, expiresAt) => {
+  if (!installationId || !token) {
+    return;
+  }
+  installationTokenCache.set(String(installationId), {
+    token,
+    expiresAt
+  });
+};
+
+const getCachedInstallationId = (owner, repo) => {
+  if (!owner || !repo) {
+    return null;
+  }
+  const key = `${owner}/${repo}`.toLowerCase();
+  const cached = installationIdCache.get(key);
+  if (!cached) {
+    return null;
+  }
+  if (cached.expiresAt > Date.now()) {
+    return cached.id;
+  }
+  installationIdCache.delete(key);
+  return null;
+};
+
+const setCachedInstallationId = (owner, repo, installationId) => {
+  if (!owner || !repo || !installationId) {
+    return;
+  }
+  const key = `${owner}/${repo}`.toLowerCase();
+  installationIdCache.set(key, {
+    id: installationId,
+    expiresAt: Date.now() + installationIdCacheTtlMs
+  });
+};
 
 const textExtensions = new Set([
   ".md",
@@ -203,17 +257,54 @@ const createAppJwt = () => {
   return `${data}.${base64UrlEncode(signature)}`;
 };
 
-const getInstallationToken = async () => {
-  const now = Date.now();
-  if (
-    cachedInstallationToken &&
-    cachedInstallationExpiresAt > now + 60_000
-  ) {
-    return cachedInstallationToken;
+const fetchInstallationIdForRepo = async (owner, repo) => {
+  if (!owner || !repo) {
+    return null;
+  }
+  const cached = getCachedInstallationId(owner, repo);
+  if (cached) {
+    return cached;
+  }
+  const jwt = createAppJwt();
+  if (!jwt) {
+    return null;
+  }
+  const response = await fetch(
+    `${githubApiBase}/repos/${owner}/${repo}/installation`,
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${jwt}`,
+        "User-Agent": "github-projects-homepage-ai-chat",
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    }
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return null;
+  }
+  const installationId = payload?.id;
+  if (installationId) {
+    setCachedInstallationId(owner, repo, installationId);
+  }
+  return installationId || null;
+};
+
+const getInstallationToken = async (options = {}) => {
+  const owner = options.owner;
+  const repo = options.repo;
+  const installationId =
+    options.installationId ||
+    githubAppInstallationId ||
+    (owner && repo ? await fetchInstallationIdForRepo(owner, repo) : null);
+  if (!installationId) {
+    return null;
   }
 
-  if (!githubAppInstallationId) {
-    return null;
+  const cached = getCachedInstallationToken(installationId);
+  if (cached) {
+    return cached;
   }
 
   const jwt = createAppJwt();
@@ -222,7 +313,7 @@ const getInstallationToken = async () => {
   }
 
   const response = await fetch(
-    `${githubApiBase}/app/installations/${githubAppInstallationId}/access_tokens`,
+    `${githubApiBase}/app/installations/${installationId}/access_tokens`,
     {
       method: "POST",
       headers: {
@@ -239,20 +330,21 @@ const getInstallationToken = async () => {
     throw new Error(payload.message || "GitHub App auth failed");
   }
 
-  cachedInstallationToken = payload.token;
-  cachedInstallationExpiresAt = payload.expires_at
+  const now = Date.now();
+  const expiresAt = payload.expires_at
     ? new Date(payload.expires_at).getTime()
     : now + 55 * 60 * 1000;
-  return cachedInstallationToken;
+  setCachedInstallationToken(installationId, payload.token, expiresAt);
+  return payload.token;
 };
 
-const getGitHubAuthHeader = async () => {
+const getGitHubAuthHeader = async (options = {}) => {
   if (githubToken) {
     return { Authorization: `Bearer ${githubToken}` };
   }
 
-  if (githubAppId && githubAppPrivateKey && githubAppInstallationId) {
-    const token = await getInstallationToken();
+  if (githubAppId && githubAppPrivateKey) {
+    const token = await getInstallationToken(options);
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
 
@@ -261,15 +353,16 @@ const getGitHubAuthHeader = async () => {
 
 const fetchGitHubJson = async (endpoint, options = {}) => {
   try {
-    const authHeader = await getGitHubAuthHeader();
+    const { auth, ...fetchOptions } = options || {};
+    const authHeader = await getGitHubAuthHeader(auth);
     const response = await fetch(`${githubApiBase}${endpoint}`, {
-      ...options,
+      ...fetchOptions,
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": "github-projects-homepage-ai-chat",
         "X-GitHub-Api-Version": "2022-11-28",
         ...authHeader,
-        ...(options.headers || {})
+        ...(fetchOptions.headers || {})
       }
     });
 
@@ -411,7 +504,9 @@ const embedChunks = async (chunkTexts) => {
 };
 
 const fetchRepoMetadata = async (owner, repo) => {
-  const result = await fetchGitHubJson(`/repos/${owner}/${repo}`);
+  const result = await fetchGitHubJson(`/repos/${owner}/${repo}`, {
+    auth: { owner, repo }
+  });
   if (result.error) {
     if (result.isRateLimit) {
       throw new Error(
@@ -425,7 +520,8 @@ const fetchRepoMetadata = async (owner, repo) => {
 
 const fetchRepoTree = async (owner, repo, ref) => {
   const result = await fetchGitHubJson(
-    `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`
+    `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+    { auth: { owner, repo } }
   );
   if (result.error) {
     throw new Error(result.error);
@@ -435,7 +531,8 @@ const fetchRepoTree = async (owner, repo, ref) => {
 
 const fetchBlob = async (owner, repo, sha) => {
   const result = await fetchGitHubJson(
-    `/repos/${owner}/${repo}/git/blobs/${sha}`
+    `/repos/${owner}/${repo}/git/blobs/${sha}`,
+    { auth: { owner, repo } }
   );
   if (result.error) {
     throw new Error(result.error);
