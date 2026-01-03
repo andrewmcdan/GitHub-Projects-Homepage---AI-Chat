@@ -90,6 +90,12 @@ a:hover {
   gap: 12px;
 }
 
+.sidebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .project-list {
   display: grid;
   gap: 12px;
@@ -700,6 +706,119 @@ a:hover {
   border-color: var(--accent);
 }
 
+.telemetry-page {
+  height: 100vh;
+  padding: 32px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  overflow: hidden;
+  animation: fadeUp 0.7s ease both;
+}
+
+.telemetry-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.telemetry-intro {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+
+.telemetry-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.telemetry-card {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  display: grid;
+  gap: 6px;
+  box-shadow: var(--shadow);
+}
+
+.telemetry-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.telemetry-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.telemetry-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.telemetry-events {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.telemetry-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.telemetry-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.telemetry-table th,
+.telemetry-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.telemetry-table th {
+  background: #f7f1e7;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.telemetry-table tbody tr:hover {
+  background: #f9f5ec;
+}
+
 @media (max-width: 1200px) {
   .layout {
     grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
@@ -734,6 +853,21 @@ a:hover {
 
   .main {
     order: 1;
+  }
+
+  .telemetry-page {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+    padding: 24px;
+  }
+
+  .telemetry-events {
+    overflow: visible;
+  }
+
+  .telemetry-table-wrap {
+    max-height: none;
   }
 }
 

@@ -121,6 +121,18 @@ export const usageEvents = pgTable("usage_events", {
     .notNull()
 });
 
+export const telemetryEvents = pgTable("telemetry_events", {
+  id: serial("id").primaryKey(),
+  visitorId: text("visitor_id"),
+  sessionId: integer("session_id").references(() => chatSessions.id),
+  eventType: text("event_type").notNull(),
+  value: integer("value"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull()
+});
+
 export const apiKeys = pgTable("api_keys", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").references(() => tenants.id),

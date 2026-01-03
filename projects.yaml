@@ -107,7 +107,9 @@ projects:
   - id: andrewmcdan-github-projects-homepage-ai-chat
     name: andrewmcdan/GitHub-Projects-Homepage---AI-Chat
     repo: https://github.com/andrewmcdan/GitHub-Projects-Homepage---AI-Chat
-    description: ""
+    description: A personal project showcase homepage with an AI-powered chat
+      assistant that answers deep questions about your GitHub repositories using
+      embeddings, hybrid search, and commit-level citations.
     tags: []
     featured: false
     docs:

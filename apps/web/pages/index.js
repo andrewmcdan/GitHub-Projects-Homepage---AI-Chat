@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -143,6 +144,25 @@ const normalizeRepoId = (value) => {
     return trimmed;
   }
   return null;
+};
+
+const sendTelemetry = (payload) => {
+  if (!payload || !payload.visitorId) {
+    return;
+  }
+  const url = `${API_BASE_URL}/telemetry`;
+  const body = JSON.stringify(payload);
+  if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+    const blob = new Blob([body], { type: "application/json" });
+    navigator.sendBeacon(url, blob);
+    return;
+  }
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true
+  }).catch(() => {});
 };
 
 const resolveRepoFromQuestion = (question, projects) => {
@@ -398,6 +418,8 @@ export default function Home() {
   const contextMenuRef = useRef(null);
   const autoScrollRef = useRef(true);
   const isAutoScrollingRef = useRef(false);
+  const telemetryStartRef = useRef(null);
+  const telemetryPageViewRef = useRef(false);
   const lastIndexedByRepo = useMemo(
     () => buildLastIndexedMap(ingestJobs),
     [ingestJobs]
@@ -482,6 +504,67 @@ export default function Home() {
     }
     setVisitorId(id);
   }, []);
+
+  useEffect(() => {
+    if (!visitorId || typeof window === "undefined") {
+      return;
+    }
+    const path = window.location.pathname;
+    if (!telemetryPageViewRef.current) {
+      sendTelemetry({
+        visitorId,
+        eventType: "page_view",
+        metadata: { path }
+      });
+      telemetryPageViewRef.current = true;
+    }
+
+    const startTimer = () => {
+      if (!telemetryStartRef.current) {
+        telemetryStartRef.current = Date.now();
+      }
+    };
+
+    const recordDuration = () => {
+      const start = telemetryStartRef.current;
+      if (!start) {
+        return;
+      }
+      telemetryStartRef.current = null;
+      const duration = Date.now() - start;
+      if (duration < 1000) {
+        return;
+      }
+      sendTelemetry({
+        visitorId,
+        eventType: "time_on_page",
+        value: Math.round(duration),
+        metadata: { path }
+      });
+    };
+
+    startTimer();
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        recordDuration();
+      } else {
+        startTimer();
+      }
+    };
+
+    const handlePageHide = () => {
+      recordDuration();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      recordDuration();
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, [visitorId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1387,14 +1470,19 @@ export default function Home() {
           <div className="ingest-panel">
             <div className="sidebar-row">
               <h3>Ingest jobs</h3>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={loadIngestJobs}
-                disabled={ingestLoading}
-              >
-                Refresh
-              </button>
+              <div className="sidebar-actions">
+                <Link className="ghost-button" href="/telemetry">
+                  Telemetry
+                </Link>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={loadIngestJobs}
+                  disabled={ingestLoading}
+                >
+                  Refresh
+                </button>
+              </div>
             </div>
             <div className="ingest-list">
               {(() => {

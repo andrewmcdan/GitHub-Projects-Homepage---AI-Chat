@@ -18,6 +18,7 @@ import {
     getRedisConnectionOptions,
     ingestJobs,
     sources,
+    telemetryEvents,
 } from "@app/shared";
 import { db } from "./db/index.js";
 
@@ -40,7 +41,7 @@ const corsOrigin = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
     : true;
 
-app.register(cors, { origin: corsOrigin });
+app.register(cors, { origin: corsOrigin, credentials: true });
 
 const resolveCorsOrigin = (request) => {
     const originHeader = request.headers.origin;
@@ -864,6 +865,44 @@ const normalizeSessionId = (value) => {
         return null;
     }
     return parsed;
+};
+
+const telemetryEventTypes = new Set([
+    "page_view",
+    "time_on_page",
+    "chat_message",
+]);
+
+const normalizeTelemetryEventType = (value) => {
+    if (typeof value !== "string") {
+        return null;
+    }
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed || !telemetryEventTypes.has(trimmed)) {
+        return null;
+    }
+    return trimmed;
+};
+
+const normalizeTelemetryValue = (value) => {
+    if (value === null || value === undefined || value === "") {
+        return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) {
+        return null;
+    }
+    return Math.max(parsed, 0);
+};
+
+const normalizeTelemetryMetadata = (value) => {
+    if (!value || typeof value !== "object") {
+        return null;
+    }
+    if (Array.isArray(value)) {
+        return null;
+    }
+    return value;
 };
 
 const fetchChatSession = async (sessionId) => {
@@ -2203,6 +2242,107 @@ app.post("/projects", async (request, reply) => {
         ingestError = err.message || "Failed to enqueue ingest job";
     }
     reply.code(201).send({ status: "created", project, ingestJob, ingestError });
+});
+
+app.post("/telemetry", async (request, reply) => {
+    const allowedOrigin = resolveCorsOrigin(request);
+    if (allowedOrigin) {
+        reply.header("Access-Control-Allow-Origin", allowedOrigin);
+        reply.header("Access-Control-Allow-Credentials", "true");
+        reply.header("Vary", "Origin");
+    }
+
+    const visitorId = normalizeVisitorId(
+        request.body?.visitorId || request.headers["x-visitor-id"]
+    );
+    if (!visitorId) {
+        reply.code(400).send({ error: "visitorId is required" });
+        return;
+    }
+
+    const eventType = normalizeTelemetryEventType(
+        request.body?.eventType || request.body?.event_type
+    );
+    if (!eventType) {
+        reply.code(400).send({ error: "eventType is required" });
+        return;
+    }
+
+    const sessionId = normalizeSessionId(
+        request.body?.sessionId || request.body?.session_id
+    );
+    const value = normalizeTelemetryValue(request.body?.value);
+    const metadata = normalizeTelemetryMetadata(request.body?.metadata);
+
+    try {
+        await db.insert(telemetryEvents).values({
+            visitorId,
+            sessionId,
+            eventType,
+            value,
+            metadata,
+        });
+        reply.send({ status: "ok" });
+    } catch (err) {
+        reply
+            .code(500)
+            .send({ error: err.message || "Failed to record telemetry" });
+    }
+});
+
+app.get("/admin/telemetry", async (request, reply) => {
+    if (!requireAdmin(request, reply)) {
+        return;
+    }
+
+    const summaryResult = await db.execute(sql`
+        select
+            count(*) filter (where event_type = 'page_view') as "pageViews",
+            count(distinct visitor_id) as "uniqueVisitors",
+            coalesce(sum(value) filter (where event_type = 'time_on_page'), 0) as "timeOnPageMs"
+        from ${telemetryEvents}
+    `);
+    const summaryRow = extractRows(summaryResult)[0] || {};
+
+    const messageResult = await db.execute(sql`
+        select
+            count(*) as "totalMessages",
+            count(*) filter (where role = 'user') as "userMessages",
+            count(*) filter (where role = 'assistant') as "assistantMessages"
+        from ${chatMessages}
+    `);
+    const messageRow = extractRows(messageResult)[0] || {};
+
+    const sessionResult = await db.execute(sql`
+        select count(*) as "sessions" from ${chatSessions}
+    `);
+    const sessionRow = extractRows(sessionResult)[0] || {};
+
+    const recentEvents = await db
+        .select({
+            id: telemetryEvents.id,
+            visitorId: telemetryEvents.visitorId,
+            eventType: telemetryEvents.eventType,
+            value: telemetryEvents.value,
+            metadata: telemetryEvents.metadata,
+            createdAt: telemetryEvents.createdAt,
+        })
+        .from(telemetryEvents)
+        .orderBy(desc(telemetryEvents.id))
+        .limit(50);
+
+    reply.send({
+        summary: {
+            pageViews: Number(summaryRow.pageViews || 0),
+            uniqueVisitors: Number(summaryRow.uniqueVisitors || 0),
+            timeOnPageMs: Number(summaryRow.timeOnPageMs || 0),
+            totalMessages: Number(messageRow.totalMessages || 0),
+            userMessages: Number(messageRow.userMessages || 0),
+            assistantMessages: Number(messageRow.assistantMessages || 0),
+            sessions: Number(sessionRow.sessions || 0),
+        },
+        recentEvents,
+    });
 });
 
 app.delete("/projects/:id", async (request, reply) => {
