@@ -62,7 +62,6 @@ services:
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
       PROJECTS_FILE: /app/projects.yaml
-      CORS_ORIGIN: http://localhost:3000
     ports:
       - "3001:3001"
     volumes:
