@@ -108,8 +108,6 @@ services:
     restart: unless-stopped
     env_file:
       - ../../.env
-    environment:
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:3001
     ports:
       - "3000:3000"
     depends_on:
