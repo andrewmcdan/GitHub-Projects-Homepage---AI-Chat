@@ -98,7 +98,7 @@ a:hover {
 
 .project-list {
   display: grid;
-  gap: 12px;
+  gap: 16px;
   flex: 1;
   overflow-y: auto;
   min-height: 0;
@@ -106,6 +106,40 @@ a:hover {
   align-content: start;
   align-items: start;
   grid-auto-rows: max-content;
+}
+
+.project-group {
+  display: grid;
+  gap: 10px;
+}
+
+.project-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #75685f;
+}
+
+.project-group-title {
+  font-weight: 600;
+}
+
+.project-group-count {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #6b5f56;
+}
+
+.project-group-list {
+  display: grid;
+  gap: 12px;
 }
 
 .project-item {

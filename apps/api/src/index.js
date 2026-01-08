@@ -1221,6 +1221,18 @@ const normalizeProjectInput = async (body) => {
         ? repoInfo.data.topics
         : [];
     const featured = Boolean(body?.featured);
+    const category = (() => {
+        if (typeof body?.category === "string" && body.category.trim()) {
+            return body.category.trim();
+        }
+        if (Array.isArray(body?.categories)) {
+            const match = body.categories.find(
+                (value) => typeof value === "string" && value.trim()
+            );
+            return match ? match.trim() : "";
+        }
+        return "";
+    })();
     let docs = Array.isArray(body?.docs)
         ? body.docs.filter((doc) => typeof doc === "string" && doc.trim())
         : [];
@@ -1240,6 +1252,10 @@ const normalizeProjectInput = async (body) => {
         tags,
         featured,
     };
+
+    if (category) {
+        project.category = category;
+    }
 
     if (docs.length > 0) {
         project.docs = docs;

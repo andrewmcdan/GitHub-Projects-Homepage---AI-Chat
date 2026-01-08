@@ -3,6 +3,7 @@ projects:
     name: Core
     repo: https://github.com/Companion-TheCube/Core
     description: TheCube CORE is the manager and arbiter of all functionality on TheCube.
+    category: Hardware
     tags: []
     featured: false
     docs:
@@ -12,6 +13,7 @@ projects:
     repo: https://github.com/andrewmcdan/MJ-image-favorites-downloader
     description: Node.js app that downloads images from Midjourney and provides a
       slideshow server
+    category: AI
     tags:
       - midjourney
       - node-js
@@ -26,6 +28,7 @@ projects:
       PiP control for the Orei UHD‑401MV HDMI multiviewer. It maps window
       position/size to PiP coordinates and sends JSON commands over serial—no
       video capture, zero added latency.
+    category: Hardware
     tags: []
     featured: false
     docs:
@@ -35,6 +38,7 @@ projects:
     repo: https://github.com/andrewmcdan/Movie-Picker
     description: Interactive Plex movie picker that uses OpenAI's GPT models to
       interview you about what you're in the mood to watch.
+    category: AI
     tags:
       - ai
       - gpt
@@ -48,6 +52,7 @@ projects:
     name: andrewmcdan/ChatGPT-History-Viewer
     repo: https://github.com/andrewmcdan/ChatGPT-History-Viewer
     description: ""
+    category: AI
     tags: []
     featured: false
     docs:
@@ -56,6 +61,7 @@ projects:
     name: andrewmcdan/Movie-library-analyses
     repo: https://github.com/andrewmcdan/Movie-library-analyses
     description: ""
+    category: Media
     tags: []
     featured: false
     docs:
@@ -64,6 +70,7 @@ projects:
     name: andrewmcdan/Embedded-Systems-CPU-Scheduler-Simulator
     repo: https://github.com/andrewmcdan/Embedded-Systems-CPU-Scheduler-Simulator
     description: Intelligent Task Scheduler Simulator for Embedded/IoT Systems
+    category: Education
     tags: []
     featured: false
     docs:
@@ -72,6 +79,7 @@ projects:
     name: andrewmcdan/Fire-Sequencer
     repo: https://github.com/andrewmcdan/Fire-Sequencer
     description: Akai Fire + Node.js = Sequencer!
+    category: Music
     tags: []
     featured: false
     docs:
@@ -80,6 +88,7 @@ projects:
     name: andrewmcdan/Launchpad-Grid-Midi-Sequencer
     repo: https://github.com/andrewmcdan/Launchpad-Grid-Midi-Sequencer
     description: ""
+    category: Music
     tags: []
     featured: false
     docs:
@@ -88,6 +97,7 @@ projects:
     name: andrewmcdan/UtilityServer
     repo: https://github.com/andrewmcdan/UtilityServer
     description: ""
+    category: Utilities
     tags: []
     featured: false
     docs:
@@ -96,6 +106,7 @@ projects:
     name: andrewmcdan/CleverDecks
     repo: https://github.com/andrewmcdan/CleverDecks
     description: Intro to SWE Group 4 Project - CleverDecks flash cards study system
+    category: Education
     tags:
       - flashcards
       - student-project
@@ -107,9 +118,10 @@ projects:
   - id: andrewmcdan-github-projects-homepage-ai-chat
     name: andrewmcdan/GitHub-Projects-Homepage---AI-Chat
     repo: https://github.com/andrewmcdan/GitHub-Projects-Homepage---AI-Chat
-    description: A personal project showcase homepage with an AI-powered chat
-      assistant that answers deep questions about your GitHub repositories using
-      embeddings, hybrid search, and commit-level citations.
+    description: (AI Assistant Coded) A personal project showcase homepage with an
+      AI-powered chat assistant that answers deep questions about your GitHub
+      repositories using embeddings, hybrid search, and commit-level citations.
+    category: AI
     tags: []
     featured: false
     docs:
@@ -118,6 +130,7 @@ projects:
     name: andrewmcdan/Tactical_Mapping
     repo: https://github.com/andrewmcdan/Tactical_Mapping
     description: ""
+    category: Utilities
     tags: []
     featured: false
     docs:

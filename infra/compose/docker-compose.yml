@@ -51,6 +51,7 @@ services:
       context: ../..
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    command: ["sh", "-c", "npm --prefix /app run db:migrate && npm run start"]
     env_file:
       - ../../.env
     environment:

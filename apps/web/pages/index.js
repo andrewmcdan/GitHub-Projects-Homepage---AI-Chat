@@ -146,6 +146,61 @@ const normalizeRepoId = (value) => {
   return null;
 };
 
+const normalizeCategory = (value) => {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : "";
+};
+
+const getProjectCategory = (project) => {
+  if (!project || typeof project !== "object") {
+    return "";
+  }
+
+  const category = normalizeCategory(project.category);
+  if (category) {
+    return category;
+  }
+
+  if (Array.isArray(project.categories)) {
+    for (const value of project.categories) {
+      const fallback = normalizeCategory(value);
+      if (fallback) {
+        return fallback;
+      }
+    }
+  }
+
+  return "";
+};
+
+const groupProjectsByCategory = (projects) => {
+  const groups = new Map();
+  const uncategorized = [];
+
+  for (const project of projects || []) {
+    const category = getProjectCategory(project);
+    if (!category) {
+      uncategorized.push(project);
+      continue;
+    }
+    const bucket = groups.get(category);
+    if (bucket) {
+      bucket.push(project);
+    } else {
+      groups.set(category, [project]);
+    }
+  }
+
+  if (uncategorized.length > 0) {
+    groups.set("Uncategorized", uncategorized);
+  }
+
+  return Array.from(groups.entries());
+};
+
 const sendTelemetry = (payload) => {
   if (!payload || !payload.visitorId) {
     return;
@@ -423,6 +478,10 @@ export default function Home() {
   const lastIndexedByRepo = useMemo(
     () => buildLastIndexedMap(ingestJobs),
     [ingestJobs]
+  );
+  const projectGroups = useMemo(
+    () => groupProjectsByCategory(projects),
+    [projects]
   );
 
   const loadProjects = async () => {
@@ -1218,63 +1277,81 @@ export default function Home() {
           ) : projects.length === 0 ? (
             <p className="muted">No projects yet. Add your first repo below.</p>
           ) : (
-            projects.map((project) => {
-              const projectId = project.id || project.repo;
-              const isExpanded = projectId === expandedProjectId;
-              const fallbackName =
-                typeof project.repo === "string" &&
-                project.repo.startsWith("https://github.com/")
-                  ? project.repo.replace("https://github.com/", "")
-                  : projectId;
-              const displayName =
-                typeof project.name === "string" && project.name.includes("/")
-                  ? project.name
-                  : fallbackName;
-              const projectRepoId = getProjectRepo(project);
-              const lastIndexed =
-                projectRepoId && adminKey
-                  ? lastIndexedByRepo.get(projectRepoId)
-                  : null;
-              return (
-                <div
-                  className="project-item"
-                  key={projectId}
-                  onContextMenu={(event) =>
-                    openContextMenu(event, { type: "project", project })
-                  }
-                >
-                  <button
-                    type="button"
-                    className="project-button"
-                    onClick={() => toggleProject(projectId)}
-                    aria-expanded={isExpanded}
-                  >
-                    <span className="project-name">{displayName}</span>
-                  </button>
-                  {isExpanded ? (
-                    <div className="project-details">
-                      <p>
-                        {project.description || "No description yet."}
-                      </p>
-                      {adminKey ? (
-                        <p className="project-meta">
-                          {lastIndexed
-                            ? `Last indexed: ${formatTimestamp(
-                                lastIndexed.value
-                              )}`
-                            : "Last indexed: not yet"}
-                        </p>
-                      ) : null}
-                      {project.repo ? (
-                        <a href={project.repo} target="_blank" rel="noreferrer">
-                          View on GitHub
-                        </a>
-                      ) : null}
-                    </div>
-                  ) : null}
+            projectGroups.map(([category, categoryProjects]) => (
+              <div className="project-group" key={category}>
+                <div className="project-group-header">
+                  <span className="project-group-title">{category}</span>
+                  <span className="project-group-count">
+                    {categoryProjects.length}
+                  </span>
                 </div>
-              );
-            })
+                <div className="project-group-list">
+                  {categoryProjects.map((project) => {
+                    const projectId = project.id || project.repo;
+                    const isExpanded = projectId === expandedProjectId;
+                    const fallbackName =
+                      typeof project.repo === "string" &&
+                      project.repo.startsWith("https://github.com/")
+                        ? project.repo.replace("https://github.com/", "")
+                        : projectId;
+                    const displayName =
+                      typeof project.name === "string" &&
+                      project.name.includes("/")
+                        ? project.name
+                        : fallbackName;
+                    const projectRepoId = getProjectRepo(project);
+                    const lastIndexed =
+                      projectRepoId && adminKey
+                        ? lastIndexedByRepo.get(projectRepoId)
+                        : null;
+                    return (
+                      <div
+                        className="project-item"
+                        key={projectId}
+                        onContextMenu={(event) =>
+                          openContextMenu(event, {
+                            type: "project",
+                            project
+                          })
+                        }
+                      >
+                        <button
+                          type="button"
+                          className="project-button"
+                          onClick={() => toggleProject(projectId)}
+                          aria-expanded={isExpanded}
+                        >
+                          <span className="project-name">{displayName}</span>
+                        </button>
+                        {isExpanded ? (
+                          <div className="project-details">
+                            <p>{project.description || "No description yet."}</p>
+                            {adminKey ? (
+                              <p className="project-meta">
+                                {lastIndexed
+                                  ? `Last indexed: ${formatTimestamp(
+                                      lastIndexed.value
+                                    )}`
+                                  : "Last indexed: not yet"}
+                              </p>
+                            ) : null}
+                            {project.repo ? (
+                              <a
+                                href={project.repo}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                View on GitHub
+                              </a>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))
           )}
         </div>
 
