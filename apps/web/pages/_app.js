@@ -19,7 +19,7 @@ export default function App({ Component, pageProps }) {
   return (
     <>
       <Head>
-        <link rel="icon" href={`${basePath}/asstes/favicon.svg`} />
+        <link rel="icon" href={`${basePath}/assets/favicon.svg`} />
       </Head>
       <Component {...pageProps} />
     </>
