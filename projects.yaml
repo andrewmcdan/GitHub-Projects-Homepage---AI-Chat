@@ -135,3 +135,45 @@ projects:
     featured: false
     docs:
       - README.md
+  - id: andrewmcdan-a-mcd-homepage
+    name: andrewmcdan/a-mcd-homepage
+    repo: https://github.com/andrewmcdan/a-mcd-homepage
+    description: ""
+    tags: []
+    featured: false
+    docs:
+      - README.md
+  - id: andrewmcdan-ai_assisted_projects
+    name: andrewmcdan/AI_Assisted_Projects
+    repo: https://github.com/andrewmcdan/AI_Assisted_Projects
+    description: This repo catalogues my projects in which I used AI to generate
+      much of the code.
+    tags: []
+    featured: false
+    docs:
+      - README.md
+  - id: andrewmcdan-ai-document-interview-system
+    name: andrewmcdan/AI-Document-Interview-System
+    repo: https://github.com/andrewmcdan/AI-Document-Interview-System
+    description: Vibe coded, LLM powered document interview system for retrieving
+      information from large amount of unstructured data found in vast libraries
+      of PDF's, docx's, and txt files.
+    tags:
+      - ai
+      - llm
+      - openai
+    featured: false
+    docs:
+      - README.md
+  - id: andrewmcdan-a-nodejs-project-for-random-js-experiments
+    name: andrewmcdan/A-nodejs-project-for-random-JS-experiments
+    repo: https://github.com/andrewmcdan/A-nodejs-project-for-random-JS-experiments
+    description: Random Javascript, HTML, and CSS experiments and projects.
+    tags:
+      - css
+      - experimental
+      - html
+      - javascript
+    featured: false
+    docs:
+      - readme.md
